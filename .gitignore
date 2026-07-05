@@ -1,0 +1,4 @@
+/spendgate
+*.test
+*.out
+.env
