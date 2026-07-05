@@ -48,7 +48,7 @@ Embeddable `net/http` middleware, binary secondary. Rejected for v1: narrows aud
 
 ```
 Client SDK (base_url swapped)
-   │  Authorization: Bearer tb_<tenant-key>   X-Spendgate-Feature: <tag>
+   │  Authorization: Bearer sg_<tenant-key>   X-Spendgate-Feature: <tag>
    ▼
 spendgate proxy (Go, single binary)
    ├── auth: tenant key lookup (in-memory cache, 30s TTL, Postgres source of truth;
