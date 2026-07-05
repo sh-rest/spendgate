@@ -1,0 +1,20 @@
+# Model prices in USD per million tokens (MTok).
+# Source of truth for cost attribution; seeded into model_prices at startup (upsert).
+# Update prices = edit this file + restart (no admin API in v1, per DESIGN.md).
+prices:
+  - provider: openai
+    model: gpt-4o
+    input_usd_per_mtok: 2.50
+    output_usd_per_mtok: 10.00
+  - provider: openai
+    model: gpt-4o-mini
+    input_usd_per_mtok: 0.15
+    output_usd_per_mtok: 0.60
+  - provider: anthropic
+    model: claude-3-5-sonnet-20241022
+    input_usd_per_mtok: 3.00
+    output_usd_per_mtok: 15.00
+  - provider: anthropic
+    model: claude-3-5-haiku-20241022
+    input_usd_per_mtok: 0.80
+    output_usd_per_mtok: 4.00
