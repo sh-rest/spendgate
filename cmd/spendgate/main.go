@@ -18,9 +18,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sh-rest/spendgate/internal/auth"
 	"github.com/sh-rest/spendgate/internal/config"
 	"github.com/sh-rest/spendgate/internal/meter"
 	"github.com/sh-rest/spendgate/internal/prices"
+	"github.com/sh-rest/spendgate/internal/proxy"
 	"github.com/sh-rest/spendgate/internal/server"
 	"github.com/sh-rest/spendgate/internal/store"
 	"github.com/sh-rest/spendgate/internal/tenant"
@@ -30,6 +32,10 @@ func main() {
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
+	}
+	// Load .env (provider keys) before reading config; real env wins.
+	if err := config.LoadDotenv(".env"); err != nil {
+		log.Printf("warning: reading .env: %v", err)
 	}
 	cfg := config.Load()
 	ctx := context.Background()
@@ -104,6 +110,7 @@ func serve(ctx context.Context, cfg config.Config) error {
 		return err
 	}
 	log.Printf("seeded %d model prices", len(priceList))
+	priceTable := prices.BuildTable(priceList) // cache in memory (DESIGN.md)
 
 	// Async metering writer.
 	writer := meter.New(meter.PGSink{Pool: st.Pool}, meter.DefaultBatchSize, meter.DefaultInterval)
@@ -111,9 +118,15 @@ func serve(ctx context.Context, cfg config.Config) error {
 	defer stopWriter() // safe to call twice; guarantees no context leak on error paths
 	go writer.Run(writerCtx)
 
+	authr := auth.New(tenant.LookupByHash(st.Pool), 30*time.Second)
+	px := proxy.New(writer, priceTable, nil,
+		proxy.Provider{Name: "openai", Prefix: "/openai", BaseURL: cfg.OpenAIBaseURL, APIKey: cfg.OpenAIKey},
+		proxy.Provider{Name: "anthropic", Prefix: "/anthropic", BaseURL: cfg.AnthropicBaseURL, APIKey: cfg.AnthropicKey},
+	)
+
 	srv := &http.Server{
 		Addr:    ":" + cfg.Port,
-		Handler: server.New(st),
+		Handler: server.New(st, authr, px),
 	}
 
 	// Graceful shutdown on SIGINT/SIGTERM.
