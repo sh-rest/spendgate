@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/sh-rest/spendgate/internal/auth"
+	"github.com/sh-rest/spendgate/internal/budget"
 	"github.com/sh-rest/spendgate/internal/config"
 	"github.com/sh-rest/spendgate/internal/meter"
 	"github.com/sh-rest/spendgate/internal/prices"
@@ -118,15 +119,21 @@ func serve(ctx context.Context, cfg config.Config) error {
 	defer stopWriter() // safe to call twice; guarantees no context leak on error paths
 	go writer.Run(writerCtx)
 
+	bud, err := budget.New(cfg.RedisURL)
+	if err != nil {
+		return err
+	}
+	defer bud.Close()
+
 	authr := auth.New(tenant.LookupByHash(st.Pool), 30*time.Second)
-	px := proxy.New(writer, priceTable, nil,
+	px := proxy.New(writer, priceTable, nil, bud,
 		proxy.Provider{Name: "openai", Prefix: "/openai", BaseURL: cfg.OpenAIBaseURL, APIKey: cfg.OpenAIKey},
 		proxy.Provider{Name: "anthropic", Prefix: "/anthropic", BaseURL: cfg.AnthropicBaseURL, APIKey: cfg.AnthropicKey},
 	)
 
 	srv := &http.Server{
 		Addr:    ":" + cfg.Port,
-		Handler: server.New(st, authr, px),
+		Handler: server.New(st, bud, authr, px),
 	}
 
 	// Graceful shutdown on SIGINT/SIGTERM.
