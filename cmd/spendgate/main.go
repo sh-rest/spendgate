@@ -21,6 +21,7 @@ import (
 	"github.com/sh-rest/spendgate/internal/auth"
 	"github.com/sh-rest/spendgate/internal/budget"
 	"github.com/sh-rest/spendgate/internal/config"
+	"github.com/sh-rest/spendgate/internal/dashboard"
 	"github.com/sh-rest/spendgate/internal/meter"
 	"github.com/sh-rest/spendgate/internal/prices"
 	"github.com/sh-rest/spendgate/internal/proxy"
@@ -136,6 +137,16 @@ func serve(ctx context.Context, cfg config.Config) error {
 		Handler: server.New(st, bud, authr, px),
 	}
 
+	// Dashboard runs on its own listener (DASHBOARD_ADDR, empty disables) so
+	// its localhost-only default doesn't constrain the proxy port.
+	var dashSrv *http.Server
+	if cfg.DashboardAddr != "" {
+		dashSrv = &http.Server{
+			Addr:    cfg.DashboardAddr,
+			Handler: dashboard.Handler(st.Pool, 0),
+		}
+	}
+
 	// Graceful shutdown on SIGINT/SIGTERM.
 	sigCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -145,6 +156,14 @@ func serve(ctx context.Context, cfg config.Config) error {
 		log.Printf("spendgate serving on :%s", cfg.Port)
 		errCh <- srv.ListenAndServe()
 	}()
+	if dashSrv != nil {
+		go func() {
+			log.Printf("dashboard serving on %s", cfg.DashboardAddr)
+			if err := dashSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("dashboard server: %v", err)
+			}
+		}()
+	}
 
 	select {
 	case err := <-errCh:
@@ -159,6 +178,11 @@ func serve(ctx context.Context, cfg config.Config) error {
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("http shutdown: %v", err)
+	}
+	if dashSrv != nil {
+		if err := dashSrv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("dashboard shutdown: %v", err)
+		}
 	}
 	// Flush metering buffer before exit.
 	stopWriter()
