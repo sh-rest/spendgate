@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>spendgate</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: #0d1117;
+    color: #e6edf3;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    padding: 2rem;
+  }
+  h1 { font-size: 1.1rem; font-weight: 600; color: #8b949e; letter-spacing: .04em; text-transform: uppercase; margin: 0 0 1.5rem; }
+  .totals { display: flex; gap: 2rem; margin-bottom: 2rem; flex-wrap: wrap; }
+  .stat { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1rem 1.5rem; min-width: 160px; }
+  .stat .label { font-size: .75rem; color: #8b949e; text-transform: uppercase; letter-spacing: .04em; }
+  .stat .value { font-size: 1.8rem; font-weight: 600; margin-top: .25rem; }
+  section { margin-bottom: 2rem; }
+  section h2 { font-size: .85rem; color: #8b949e; text-transform: uppercase; letter-spacing: .04em; margin: 0 0 .75rem; }
+  .bar-row { display: flex; align-items: center; gap: .75rem; margin-bottom: .5rem; }
+  .bar-name { width: 140px; flex-shrink: 0; font-size: .85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bar-track { flex: 1; background: #21262d; border-radius: 4px; height: 20px; overflow: hidden; }
+  .bar-fill { height: 100%; background: #58a6ff; border-radius: 4px; transition: width .3s ease; }
+  .bar-value { width: 110px; text-align: right; font-size: .85rem; font-variant-numeric: tabular-nums; flex-shrink: 0; }
+  table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+  th, td { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid #21262d; }
+  th { color: #8b949e; font-weight: 500; text-transform: uppercase; font-size: .7rem; letter-spacing: .04em; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .badge { display: inline-block; font-size: .65rem; padding: .1rem .4rem; border-radius: 4px; background: #3d2f00; color: #d29922; margin-left: .4rem; }
+  .empty { color: #8b949e; font-size: .85rem; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #3fb950; margin-right: .4rem; }
+</style>
+</head>
+<body>
+  <h1>spendgate <span id="conn-state" class="empty">connecting&hellip;</span></h1>
+
+  <div class="totals">
+    <div class="stat"><div class="label">Total spend (24h)</div><div class="value" id="total-spend">$0.00</div></div>
+    <div class="stat"><div class="label">Requests (24h)</div><div class="value" id="total-requests">0</div></div>
+  </div>
+
+  <section>
+    <h2>Spend per tenant</h2>
+    <div id="tenant-bars"><div class="empty">no data yet</div></div>
+  </section>
+
+  <section>
+    <h2>Spend per feature</h2>
+    <table>
+      <thead><tr><th>Tenant</th><th>Feature</th><th class="num">Requests</th><th class="num">Spend</th></tr></thead>
+      <tbody id="feature-rows"><tr><td colspan="4" class="empty">no data yet</td></tr></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Spend per model</h2>
+    <table>
+      <thead><tr><th>Provider</th><th>Model</th><th class="num">Requests</th><th class="num">Spend</th></tr></thead>
+      <tbody id="model-rows"><tr><td colspan="4" class="empty">no data yet</td></tr></tbody>
+    </table>
+  </section>
+
+<script>
+  const usd = (n) => "$" + Number(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+  function render(s) {
+    document.getElementById("total-spend").textContent = usd(s.total_spend_usd);
+    document.getElementById("total-requests").textContent = s.total_requests.toLocaleString();
+
+    const maxSpend = Math.max(1e-9, ...s.tenants.map(t => t.spend_usd));
+    const bars = document.getElementById("tenant-bars");
+    if (!s.tenants.length) {
+      bars.innerHTML = '<div class="empty">no data yet</div>';
+    } else {
+      bars.innerHTML = s.tenants.map(t => `
+        <div class="bar-row">
+          <div class="bar-name" title="${esc(t.name)}">${esc(t.name)}</div>
+          <div class="bar-track"><div class="bar-fill" style="width:${(t.spend_usd / maxSpend * 100).toFixed(1)}%"></div></div>
+          <div class="bar-value">${usd(t.spend_usd)}${t.estimated_share > 0 ? `<span class="badge">${Math.round(t.estimated_share * 100)}% est.</span>` : ""}</div>
+        </div>`).join("");
+    }
+
+    const featureRows = document.getElementById("feature-rows");
+    featureRows.innerHTML = s.features.length
+      ? s.features.map(f => `<tr><td>${esc(f.tenant)}</td><td>${esc(f.feature || "(none)")}</td><td class="num">${f.requests}</td><td class="num">${usd(f.spend_usd)}</td></tr>`).join("")
+      : '<tr><td colspan="4" class="empty">no data yet</td></tr>';
+
+    const modelRows = document.getElementById("model-rows");
+    modelRows.innerHTML = s.models.length
+      ? s.models.map(m => `<tr><td>${esc(m.provider)}</td><td>${esc(m.model)}</td><td class="num">${m.requests}</td><td class="num">${usd(m.spend_usd)}</td></tr>`).join("")
+      : '<tr><td colspan="4" class="empty">no data yet</td></tr>';
+  }
+
+  const state = document.getElementById("conn-state");
+  const es = new EventSource("/api/live");
+  es.addEventListener("summary", (e) => {
+    state.innerHTML = '<span class="dot"></span>live';
+    render(JSON.parse(e.data));
+  });
+  es.onerror = () => { state.textContent = "reconnecting…"; };
+</script>
+</body>
+</html>
