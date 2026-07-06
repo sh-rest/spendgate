@@ -29,6 +29,22 @@ curl localhost:8080/healthz
 curl localhost:8080/readyz
 ```
 
+## Tests
+
+```
+go test ./...          # unit tests, no external services
+make up                 # start Postgres + Redis
+make test-integration   # multi-replica budget-enforcement test against them
+```
+
+The integration test starts two independently-wired spendgate instances (own
+Postgres pool, Redis client, and metering writer each) sharing one real
+Postgres and Redis, fires a concurrent burst across both that would blow past
+a tenant's budget many times over, and asserts the cap is enforced exactly:
+allowed spend never exceeds the cap in either Redis or Postgres, every
+request is accounted for as exactly one 200 or one 429, and the reconciled
+Redis counter matches the sum of real metered cost in Postgres.
+
 ## Env vars
 
 | Var | Default |
