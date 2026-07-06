@@ -8,13 +8,15 @@ import (
 	"time"
 
 	"github.com/sh-rest/spendgate/internal/auth"
+	"github.com/sh-rest/spendgate/internal/budget"
 	"github.com/sh-rest/spendgate/internal/proxy"
 	"github.com/sh-rest/spendgate/internal/store"
 )
 
 // New returns the HTTP handler for the gateway. The proxy is mounted for the
-// OpenAI and Anthropic route prefixes behind the auth middleware.
-func New(st *store.Store, a *auth.Authenticator, p *proxy.Proxy) http.Handler {
+// OpenAI and Anthropic route prefixes behind the auth middleware. A nil budget
+// client means /readyz skips the Redis check.
+func New(st *store.Store, b *budget.Client, a *auth.Authenticator, p *proxy.Proxy) http.Handler {
 	mux := http.NewServeMux()
 
 	proxyH := a.Middleware(p)
@@ -34,6 +36,12 @@ func New(st *store.Store, a *auth.Authenticator, p *proxy.Proxy) http.Handler {
 		if err := st.Ping(ctx); err != nil {
 			http.Error(w, "postgres unavailable", http.StatusServiceUnavailable)
 			return
+		}
+		if b != nil {
+			if err := b.Ping(ctx); err != nil {
+				http.Error(w, "redis unavailable", http.StatusServiceUnavailable)
+				return
+			}
 		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ready"))

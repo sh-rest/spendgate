@@ -7,13 +7,17 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
+	"log"
+	"math"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/sh-rest/spendgate/internal/auth"
+	"github.com/sh-rest/spendgate/internal/budget"
 	"github.com/sh-rest/spendgate/internal/meter"
 	"github.com/sh-rest/spendgate/internal/prices"
 	"github.com/sh-rest/spendgate/internal/tenant"
@@ -32,15 +36,26 @@ type Proxy struct {
 	writer    *meter.Writer
 	prices    prices.Table
 	client    *http.Client
+	budget    *budget.Client // nil disables budget enforcement entirely
 	providers []Provider
 }
 
-// New builds a Proxy. A nil client uses one with no timeout (streaming-safe).
-func New(writer *meter.Writer, priceTable prices.Table, client *http.Client, providers ...Provider) *Proxy {
+// New builds a Proxy. A nil client uses one with no timeout (streaming-safe). A
+// nil budget client disables enforcement (all requests forward unchecked).
+func New(writer *meter.Writer, priceTable prices.Table, client *http.Client, bud *budget.Client, providers ...Provider) *Proxy {
 	if client == nil {
 		client = &http.Client{}
 	}
-	return &Proxy{writer: writer, prices: priceTable, client: client, providers: providers}
+	return &Proxy{writer: writer, prices: priceTable, client: client, budget: bud, providers: providers}
+}
+
+// reservation records a budget reservation made before forwarding, so the actual
+// metered cost can be reconciled against the estimate once known. active is false
+// when no reservation was made (no budget, no enforcement, or fail-open).
+type reservation struct {
+	active   bool
+	key      string
+	estMicro int64
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -67,6 +82,12 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, pv Provider) {
 		body, injected = maybeInjectUsage(body)
 	}
 
+	// Budget enforcement runs BEFORE forwarding, only for tenants with a cap set.
+	res, forward := p.checkBudget(w, r, pv, t, body)
+	if !forward {
+		return // 429 (over budget) or 503 (Redis down, fail-closed) already written
+	}
+
 	target := pv.BaseURL + strings.TrimPrefix(r.URL.Path, pv.Prefix)
 	if r.URL.RawQuery != "" {
 		target += "?" + r.URL.RawQuery
@@ -74,7 +95,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, pv Provider) {
 	req, err := http.NewRequestWithContext(r.Context(), r.Method, target, bytes.NewReader(body))
 	if err != nil {
 		http.Error(w, "bad gateway", http.StatusBadGateway)
-		p.enqueue(t, feature, pv.Name, requestModel(body), 0, 0, false, http.StatusBadGateway, start)
+		p.enqueue(res, t, feature, pv.Name, requestModel(body), 0, 0, false, http.StatusBadGateway, start)
 		return
 	}
 	copyHeaders(req.Header, r.Header)
@@ -92,7 +113,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, pv Provider) {
 	if err != nil {
 		// Upstream unreachable. Never retry; surface as 502 and record it.
 		http.Error(w, "upstream error", http.StatusBadGateway)
-		p.enqueue(t, feature, pv.Name, requestModel(body), 0, 0, false, http.StatusBadGateway, start)
+		p.enqueue(res, t, feature, pv.Name, requestModel(body), 0, 0, false, http.StatusBadGateway, start)
 		return
 	}
 	defer resp.Body.Close()
@@ -101,21 +122,107 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, pv Provider) {
 	streaming := strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")
 
 	if streaming {
-		p.streamResponse(w, r, resp, pv, injected, body, feature, t, start)
+		p.streamResponse(w, r, resp, pv, injected, body, feature, t, res, start)
 		return
 	}
-	p.bufferedResponse(w, resp, pv, body, feature, t, start)
+	p.bufferedResponse(w, resp, pv, body, feature, t, res, start)
+}
+
+// checkBudget reserves an estimated cost against the tenant's monthly cap before
+// forwarding. Returns the reservation (to reconcile later) and whether to proceed.
+// No cap set or no budget client → proceed unreserved. Over budget → 429. Redis
+// unreachable → per-tenant fail_open: true forwards (unmetered-budget, warn),
+// false returns 503.
+func (p *Proxy) checkBudget(w http.ResponseWriter, r *http.Request, pv Provider, t tenant.Tenant, body []byte) (reservation, bool) {
+	if t.MonthlyBudgetUSD == nil || p.budget == nil {
+		return reservation{}, true
+	}
+	est := p.estimateMicro(pv, body)
+	limit := toMicro(*t.MonthlyBudgetUSD)
+	key := budget.MonthKey(t.ID, time.Now())
+
+	allowed, spend, err := p.budget.Reserve(r.Context(), key, limit, est)
+	if err != nil {
+		if t.FailOpen {
+			log.Printf("budget: redis unavailable for tenant %d, failing open (forwarding unmetered-budget): %v", t.ID, err)
+			return reservation{}, true // still metered to Postgres downstream
+		}
+		writeBudgetUnavailable(w, t)
+		return reservation{}, false
+	}
+	if !allowed {
+		writeBudgetExceeded(w, t, *t.MonthlyBudgetUSD, float64(spend)/1e6)
+		return reservation{}, false
+	}
+	return reservation{active: true, key: key, estMicro: est}, true
+}
+
+// estimateMicro is the conservative reservation cost in micro-USD. Input tokens
+// are approximated as len(body)/4 (same chars/4 heuristic the metering fallback
+// uses); output tokens use the request's max_tokens when set, else a constant
+// ceiling. The real cost is reconciled afterwards, so the estimate only needs to
+// be large enough to stop a request slipping past the cap, not exact.
+// ponytail: unknown-priced models estimate to 0, so they reserve nothing and are
+// effectively unenforced — you can't cap spend without a price. Add the model to
+// prices.yaml to enforce it.
+func (p *Proxy) estimateMicro(pv Provider, body []byte) int64 {
+	in := len(body) / 4
+	out := requestMaxTokens(body)
+	if out <= 0 {
+		out = defaultEstOutputTokens
+	}
+	cost, _ := p.prices.Cost(pv.Name, requestModel(body), in, out)
+	return toMicro(cost)
+}
+
+const defaultEstOutputTokens = 1000
+
+func toMicro(usd float64) int64 { return int64(math.Round(usd * 1e6)) }
+
+// requestMaxTokens reads the output-token ceiling from a request body (OpenAI's
+// max_tokens / max_completion_tokens, Anthropic's max_tokens), 0 if absent.
+func requestMaxTokens(body []byte) int {
+	var m struct {
+		MaxTokens           int `json:"max_tokens"`
+		MaxCompletionTokens int `json:"max_completion_tokens"`
+	}
+	_ = json.Unmarshal(body, &m)
+	if m.MaxTokens > 0 {
+		return m.MaxTokens
+	}
+	return m.MaxCompletionTokens
+}
+
+func writeBudgetExceeded(w http.ResponseWriter, t tenant.Tenant, budgetUSD, spendUSD float64) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusTooManyRequests)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"error": map[string]any{
+			"type":       "budget_exceeded",
+			"tenant":     t.Name,
+			"budget_usd": budgetUSD,
+			"spend_usd":  spendUSD,
+		},
+	})
+}
+
+func writeBudgetUnavailable(w http.ResponseWriter, t tenant.Tenant) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"error": map[string]any{"type": "budget_unavailable", "tenant": t.Name},
+	})
 }
 
 // bufferedResponse handles non-streaming responses: pass body through
 // unmodified, parse usage on success, fall back to chars/4 when absent.
-func (p *Proxy) bufferedResponse(w http.ResponseWriter, resp *http.Response, pv Provider, reqBody []byte, feature string, t tenant.Tenant, start time.Time) {
+func (p *Proxy) bufferedResponse(w http.ResponseWriter, resp *http.Response, pv Provider, reqBody []byte, feature string, t tenant.Tenant, res reservation, start time.Time) {
 	respBody, _ := io.ReadAll(resp.Body)
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(respBody)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		p.enqueue(t, feature, pv.Name, requestModel(reqBody), 0, 0, false, resp.StatusCode, start)
+		p.enqueue(res, t, feature, pv.Name, requestModel(reqBody), 0, 0, false, resp.StatusCode, start)
 		return
 	}
 
@@ -125,13 +232,13 @@ func (p *Proxy) bufferedResponse(w http.ResponseWriter, resp *http.Response, pv 
 		u.InputTokens = len(reqBody) / 4  // chars/4 heuristic (DESIGN.md fallback)
 		u.OutputTokens = len(respBody) / 4
 	}
-	p.enqueue(t, feature, pv.Name, modelOr(u.Model, reqBody), u.InputTokens, u.OutputTokens, estimated, resp.StatusCode, start)
+	p.enqueue(res, t, feature, pv.Name, modelOr(u.Model, reqBody), u.InputTokens, u.OutputTokens, estimated, resp.StatusCode, start)
 }
 
 // streamResponse passes an SSE stream through, flushing per event, while an
 // extractor observes usage. A mid-stream disconnect still emits with whatever
 // usage is known.
-func (p *Proxy) streamResponse(w http.ResponseWriter, r *http.Request, resp *http.Response, pv Provider, injected bool, reqBody []byte, feature string, t tenant.Tenant, start time.Time) {
+func (p *Proxy) streamResponse(w http.ResponseWriter, r *http.Request, resp *http.Response, pv Provider, injected bool, reqBody []byte, feature string, t tenant.Tenant, res reservation, start time.Time) {
 	w.WriteHeader(resp.StatusCode)
 	flush := func() {}
 	if f, ok := w.(http.Flusher); ok {
@@ -155,11 +262,12 @@ func (p *Proxy) streamResponse(w http.ResponseWriter, r *http.Request, resp *htt
 	_ = streamSSE(w, flush, bufio.NewReader(resp.Body), ext, drop)
 
 	u := ext.usage()
-	p.enqueue(t, feature, pv.Name, modelOr(u.Model, reqBody), u.InputTokens, u.OutputTokens, !u.HasUsage, resp.StatusCode, start)
+	p.enqueue(res, t, feature, pv.Name, modelOr(u.Model, reqBody), u.InputTokens, u.OutputTokens, !u.HasUsage, resp.StatusCode, start)
 }
 
-func (p *Proxy) enqueue(t tenant.Tenant, feature, provider, model string, in, out int, estimated bool, status int, start time.Time) {
+func (p *Proxy) enqueue(res reservation, t tenant.Tenant, feature, provider, model string, in, out int, estimated bool, status int, start time.Time) {
 	cost, _ := p.prices.Cost(provider, model, in, out)
+	p.reconcile(res, cost)
 	p.writer.Enqueue(meter.Event{
 		TenantID:     t.ID,
 		Feature:      feature,
@@ -173,6 +281,21 @@ func (p *Proxy) enqueue(t tenant.Tenant, feature, provider, model string, in, ou
 		LatencyMS:    int(time.Since(start).Milliseconds()),
 		CreatedAt:    time.Now().UTC(),
 	})
+}
+
+// reconcile adjusts the reserved estimate to the actual metered cost. On an error
+// path (cost 0) this releases the whole reservation. Best-effort with a detached
+// timeout: the client response is already sent, so a reconcile failure must not
+// block, only log.
+func (p *Proxy) reconcile(res reservation, cost float64) {
+	if !res.active || p.budget == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := p.budget.Reconcile(ctx, res.key, toMicro(cost)-res.estMicro); err != nil {
+		log.Printf("budget: reconcile %s: %v", res.key, err)
+	}
 }
 
 func newExtractor(provider string) extractor {

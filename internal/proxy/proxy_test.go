@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sh-rest/spendgate/internal/auth"
+	"github.com/sh-rest/spendgate/internal/budget"
 	"github.com/sh-rest/spendgate/internal/meter"
 	"github.com/sh-rest/spendgate/internal/prices"
 	"github.com/sh-rest/spendgate/internal/tenant"
@@ -44,12 +45,18 @@ type testHarness struct {
 	stop     func()
 	lastReq  *http.Request // last request the fake provider saw
 	lastBody string
+	budget   *budget.Client // nil = enforcement disabled
+	tnt      tenant.Tenant  // tenant the auth stub returns
 }
 
 func newHarness(t *testing.T, providerName string, fake http.HandlerFunc) *testHarness {
+	return newBudgetHarness(t, providerName, fake, nil, tenant.Tenant{ID: 7})
+}
+
+func newBudgetHarness(t *testing.T, providerName string, fake http.HandlerFunc, bud *budget.Client, tnt tenant.Tenant) *testHarness {
 	t.Helper()
 	upstream := httptest.NewServer(nil)
-	h := &testHarness{sink: &captureSink{}}
+	h := &testHarness{sink: &captureSink{}, budget: bud, tnt: tnt}
 	upstream.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := readAll(r)
 		h.lastReq = r
@@ -66,11 +73,11 @@ func newHarness(t *testing.T, providerName string, fake http.HandlerFunc) *testH
 		{Provider: "openai", Model: "gpt-4o-mini-2024-07-18", InputUSDPerMTok: 0.15, OutputUSDPerMTok: 0.60},
 		{Provider: "anthropic", Model: "claude-haiku-4-5-20251001", InputUSDPerMTok: 1.0, OutputUSDPerMTok: 5.0},
 	})
-	p := New(writer, table, nil, Provider{
+	p := New(writer, table, nil, h.budget, Provider{
 		Name: providerName, Prefix: "/" + providerName, BaseURL: upstream.URL, APIKey: "provider-secret",
 	})
 	authr := auth.New(func(context.Context, string) (tenant.Tenant, bool, error) {
-		return tenant.Tenant{ID: 7}, true, nil
+		return h.tnt, true, nil
 	}, time.Minute)
 
 	h.handler = authr.Middleware(p)
