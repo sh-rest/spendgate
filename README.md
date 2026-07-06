@@ -4,9 +4,14 @@ Self-hosted LLM cost-attribution gateway, written in Go.
 
 ## Status
 
-Week-1 skeleton: config, schema/migrations, `create-tenant` CLI, health
-endpoints, and an async batch metering writer. Not built yet: the proxy hot
-path, streaming, Redis-based enforcement, and the dashboard.
+Built: config, schema/migrations, `create-tenant` CLI, health endpoints, the
+proxy hot path (OpenAI + Anthropic, streaming + non-streaming), async batch
+metering to Postgres, and Redis per-tenant monthly budget enforcement. Budget
+checks run before forwarding via a single atomic Lua reserve-and-check (exact
+across replicas), reconciled to the real cost once the response completes; over
+budget returns 429, and on a Redis outage each tenant's `fail_open` flag picks
+forward-unmetered-budget vs 503. `/readyz` reports Postgres and Redis health.
+Not built yet: the live dashboard and benchmark numbers.
 
 ## Quickstart
 
