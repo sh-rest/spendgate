@@ -14,12 +14,13 @@ import (
 )
 
 // Tenant is the minimal identity the proxy hot path needs. FailOpen governs
-// Redis-outage behaviour in a later phase; carried here so the cached lookup
-// already has it.
+// Redis-outage behaviour (true = forward unmetered-budget, false = 503).
+// MonthlyBudgetUSD is nil when the tenant has no cap (NULL = no enforcement).
 type Tenant struct {
-	ID       int64
-	Name     string
-	FailOpen bool
+	ID               int64
+	Name             string
+	FailOpen         bool
+	MonthlyBudgetUSD *float64
 }
 
 // LookupByHash resolves a key hash to a tenant. Returns (_, false, nil) when no
@@ -28,8 +29,8 @@ func LookupByHash(pool *pgxpool.Pool) func(context.Context, string) (Tenant, boo
 	return func(ctx context.Context, keyHash string) (Tenant, bool, error) {
 		var t Tenant
 		err := pool.QueryRow(ctx,
-			`SELECT id, name, fail_open FROM tenants WHERE api_key_hash = $1`, keyHash,
-		).Scan(&t.ID, &t.Name, &t.FailOpen)
+			`SELECT id, name, fail_open, monthly_budget_usd FROM tenants WHERE api_key_hash = $1`, keyHash,
+		).Scan(&t.ID, &t.Name, &t.FailOpen, &t.MonthlyBudgetUSD)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Tenant{}, false, nil
 		}
