@@ -44,7 +44,13 @@ type Proxy struct {
 // nil budget client disables enforcement (all requests forward unchecked).
 func New(writer *meter.Writer, priceTable prices.Table, client *http.Client, bud *budget.Client, providers ...Provider) *Proxy {
 	if client == nil {
-		client = &http.Client{}
+		// Default transport caps idle conns per host at 2, which forces a new
+		// TCP connection per request under concurrency and dominates tail
+		// latency. Pool enough for the expected concurrent load.
+		tr := http.DefaultTransport.(*http.Transport).Clone()
+		tr.MaxIdleConns = 1024
+		tr.MaxIdleConnsPerHost = 1024
+		client = &http.Client{Transport: tr}
 	}
 	return &Proxy{writer: writer, prices: priceTable, client: client, budget: bud, providers: providers}
 }
