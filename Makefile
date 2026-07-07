@@ -1,4 +1,4 @@
-.PHONY: up down migrate-up run test vet test-integration
+.PHONY: up down migrate-up run test vet test-integration bench
 
 up:
 	docker compose up -d
@@ -24,3 +24,8 @@ test-integration:
 	TEST_DATABASE_URL="postgres://spendgate:spendgate@localhost:5432/spendgate?sslmode=disable" \
 	TEST_REDIS_URL="redis://localhost:6379" \
 	go test ./internal/integration/... -run TestBudgetEnforcedAcrossReplicas -v
+
+# Measure gateway overhead end to end (starts Postgres/Redis, fake provider,
+# gateway, then load-tests direct vs via-gateway). Writes bench/results-<date>.md.
+bench:
+	./bench/run.sh
