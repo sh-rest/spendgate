@@ -20,6 +20,8 @@ import (
 func main() {
 	addr := flag.String("addr", ":9090", "listen address")
 	latency := flag.Duration("latency", 10*time.Millisecond, "simulated provider latency before responding")
+	promptTokens := flag.Int("prompt-tokens", 12, "usage.prompt_tokens reported in every response")
+	completionTokens := flag.Int("completion-tokens", 8, "usage.completion_tokens reported in every response")
 	flag.Parse()
 
 	mux := http.NewServeMux()
@@ -38,30 +40,30 @@ func main() {
 		time.Sleep(*latency) // ponytail: fixed latency, add jitter only if a scenario needs it
 
 		if req.Stream {
-			streamResponse(w, req.Model)
+			streamResponse(w, req.Model, *promptTokens, *completionTokens)
 			return
 		}
-		nonStream(w, req.Model)
+		nonStream(w, req.Model, *promptTokens, *completionTokens)
 	})
 
 	log.Printf("fakeprovider listening on %s (latency %s)", *addr, *latency)
 	log.Fatal(http.ListenAndServe(*addr, mux))
 }
 
-func nonStream(w http.ResponseWriter, model string) {
+func nonStream(w http.ResponseWriter, model string, promptTokens, completionTokens int) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"id":      "chatcmpl-bench",
 		"object":  "chat.completion",
 		"model":   model,
 		"choices": []any{map[string]any{"index": 0, "message": map[string]any{"role": "assistant", "content": "hello from fakeprovider"}, "finish_reason": "stop"}},
-		"usage":   map[string]any{"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20},
+		"usage":   map[string]any{"prompt_tokens": promptTokens, "completion_tokens": completionTokens, "total_tokens": promptTokens + completionTokens},
 	})
 }
 
 // streamResponse emits a few content deltas then a usage-bearing final frame
 // (choices:[] with usage), matching OpenAI include_usage streaming shape.
-func streamResponse(w http.ResponseWriter, model string) {
+func streamResponse(w http.ResponseWriter, model string, promptTokens, completionTokens int) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
@@ -77,7 +79,7 @@ func streamResponse(w http.ResponseWriter, model string) {
 		delta(tok)
 	}
 	// Final usage-only frame.
-	fmt.Fprintf(w, "data: {\"id\":\"chatcmpl-bench\",\"object\":\"chat.completion.chunk\",\"model\":%q,\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":8,\"total_tokens\":20}}\n\n", model)
+	fmt.Fprintf(w, "data: {\"id\":\"chatcmpl-bench\",\"object\":\"chat.completion.chunk\",\"model\":%q,\"choices\":[],\"usage\":{\"prompt_tokens\":%d,\"completion_tokens\":%d,\"total_tokens\":%d}}\n\n", model, promptTokens, completionTokens, promptTokens+completionTokens)
 	fmt.Fprint(w, "data: [DONE]\n\n")
 	if f != nil {
 		f.Flush()
