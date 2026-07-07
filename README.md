@@ -42,7 +42,7 @@ tenant/feature in real time.
 - **Per-tenant / per-feature attribution** — tag requests with
   `X-Spendgate-Feature`; cost rolls up by tenant and feature.
 - **Exact multi-replica budget enforcement** — monthly budget checked via a
-  single atomic Redis Lua script (reserve-then-check) before forwarding, so
+  single atomic Redis Lua script (check-and-reserve, reconciled after) before forwarding, so
   concurrent requests across replicas can't blow past the cap. Reconciled to
   real cost once the response completes.
 - **Streaming usage extraction** — OpenAI and Anthropic both emit token usage
