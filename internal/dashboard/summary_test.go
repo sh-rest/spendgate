@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/sh-rest/spendgate/internal/store"
 )
 
 // testPool connects to TEST_DATABASE_URL, skipping if unset (matches the
@@ -23,8 +25,8 @@ func testPool(t *testing.T) *pgxpool.Pool {
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `SELECT 1`); err != nil {
-		t.Fatalf("db unreachable: %v", err)
+	if err := (&store.Store{Pool: pool}).Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
 	}
 	return pool
 }
