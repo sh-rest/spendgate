@@ -74,3 +74,18 @@ These are **dev-laptop numbers**, honest about their limits:
 The direct-vs-gateway subtraction is the honest part: whatever same-box noise
 exists hits both legs, so the *difference* is a fair estimate of spendgate's
 added cost on this machine.
+
+## History: the connection-pool bug this benchmark found
+
+The first bench run (2026-07-06) is what this harness is for: at 500
+connections the gateway's outbound `http.Client` (`internal/proxy/proxy.go`,
+`New`) was using Go's default transport (`MaxIdleConnsPerHost = 2`), which
+couldn't pool upstream connections under load. Result: p95 overhead of
+278ms and ~16k errors, all TCP connection churn (confirmed via socket
+inspection — 20k+ `TIME_WAIT`), not gateway logic.
+
+Fix applied in `proxy.New` (commit `60f20a0`): set `MaxIdleConns` /
+`MaxIdleConnsPerHost = 1024` on the client's transport. Current results
+(`bench/results-2026-07-07.md`) reflect the fix — 500-conn non-streaming p95
+overhead is 7.473ms with zero errors. The stale pre-fix results file has
+been deleted; the fixed numbers are the ones that matter.
