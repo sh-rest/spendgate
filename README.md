@@ -15,6 +15,8 @@ async. Both are more full-featured (evals, prompt management, more
 providers) — spendgate deliberately isn't, in exchange for a simpler,
 faster, self-hosted core.
 
+![Live dashboard ticking up as traffic flows across two tenants, ending with one tenant hitting its budget cap and getting 429'd](docs/demo.gif)
+
 ## 60-second quickstart
 
 ```
