@@ -170,34 +170,25 @@ socket-starved, to show the true per-request overhead.
 
 _Design target: p95 gateway overhead < 5ms at 500 concurrent (DESIGN.md success criteria)._
 
-## Diagnosis: why the 500-connection numbers explode
+## History: the connection-pool bug this benchmark surfaced
 
-The 500-conn via-gateway figures (hundreds of ms, tens of thousands of errors)
-are **not** steady-state overhead. Root cause, confirmed by socket inspection
-during a run: 20k+ sockets in \`TIME_WAIT\` and hundreds in \`SYN_SENT\` on the
-gateway→provider hop.
+An earlier run (2026-07-06, superseded) showed the 500-connection numbers
+exploding: p95 overhead of 278ms and ~16k errors out of ~31k requests. Root
+cause, confirmed by socket inspection during that run: 20k+ sockets in
+\`TIME_WAIT\` and hundreds in \`SYN_SENT\` on the gateway→provider hop.
 
-The gateway's outbound HTTP client is \`&http.Client{}\` (\`internal/proxy/proxy.go\`,
-\`New\`), which uses Go's **default transport** — \`MaxIdleConnsPerHost = 2\`. Under
-500 concurrent forwards it cannot pool upstream connections, so it opens and
-closes a fresh TCP connection to the provider on almost every request. On a
-single box this exhausts ephemeral ports (\`TIME_WAIT\` pile-up) and connection
-setup, not gateway logic, dominates latency.
+The gateway's outbound HTTP client was \`&http.Client{}\` (\`internal/proxy/proxy.go\`,
+\`New\`), using Go's default transport (\`MaxIdleConnsPerHost = 2\`). Under 500
+concurrent forwards it couldn't pool upstream connections, so it opened and
+closed a fresh TCP connection to the provider on almost every request —
+exhausting ephemeral ports and charging a full TCP handshake to most requests.
+Evidence it was the pool and not gateway logic: at $MOD_CONC connections the
+same build showed sub-millisecond p50 overhead.
 
-Evidence it is the pool and not the hot path: at $MOD_CONC connections (table
-above) p50 overhead is sub-millisecond, though p95/p99 still carry ~12-18ms —
-the same un-pooled upstream transport charging a TCP handshake to the tail
-requests it can't reuse a connection for, so even here the <5ms p95 target is
-missed for that reason, not by the gateway's own logic; the load generator's
-*own* transport is tuned
-(\`MaxIdleConnsPerHost = c*2\`), which is why the direct-to-provider leg sustains
-tens of thousands of req/s with zero errors at the same concurrency.
-
-**Recommended gateway fix (one place, \`proxy.New\`):** give the proxy an
-\`http.Client\` whose \`Transport\` sets \`MaxIdleConnsPerHost\` /
-\`MaxIdleConns\` to at least the expected concurrency. This is a real gateway
-configuration gap the benchmark surfaced; left unchanged here because the hot
-path is not the benchmark's to modify.
+**Fix applied (commit \`60f20a0\`, \`proxy.New\`):** the proxy's \`http.Client\`
+now sets \`MaxIdleConns\` / \`MaxIdleConnsPerHost = 1024\` on its transport, so
+it can hold enough pooled upstream connections for the benchmark's
+concurrency. Current numbers above reflect the fix.
 EOF
 
 echo
