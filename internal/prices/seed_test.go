@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/sh-rest/spendgate/internal/store"
 )
 
 // TestSeedUpsert verifies re-seeding updates existing rows rather than
@@ -23,8 +25,8 @@ func TestSeedUpsert(t *testing.T) {
 	}
 	defer pool.Close()
 
-	if _, err := pool.Exec(ctx, `CREATE TEMP TABLE IF NOT EXISTS _t AS SELECT 1`); err != nil {
-		t.Fatalf("db unreachable: %v", err)
+	if err := (&store.Store{Pool: pool}).Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
 	}
 
 	p := []Price{{Provider: "test", Model: "m1", InputUSDPerMTok: 1, OutputUSDPerMTok: 2}}
